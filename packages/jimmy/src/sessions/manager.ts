@@ -28,6 +28,7 @@ import { getClaudeExpectedResetAt, isLikelyNearClaudeUsageLimit, recordClaudeRat
 import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
+import { detectGoalForMessage } from "../connectors/slack/goal-hook.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
 
 export interface RouteOptions {
@@ -286,6 +287,18 @@ export class SessionManager {
         const transcript = sinceMessages.slice(-20).join("\n\n");
         promptToRun =
           `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the last USER message.\n\n${transcript}`;
+      } else if (session.engine === "claude" && session.source === "slack") {
+        // If the Slack message clearly asks for autonomous multi-turn work, ask
+        // a cheap Haiku call to distil a single completion sentence and prefix
+        // `/goal <sentence>` so Claude Code v2.1.139+ Stop hook handles the loop.
+        // Failure path returns null and we send the prompt through unchanged.
+        const goalSentence = await detectGoalForMessage(msg.text);
+        if (goalSentence) {
+          logger.info(
+            `[goal-hook] /goal injected for session ${session.id}: ${goalSentence.slice(0, 100)}`,
+          );
+          promptToRun = `/goal ${goalSentence}\n\n${msg.text}`;
+        }
       }
 
       // Budget enforcement — check BEFORE engine.run()
